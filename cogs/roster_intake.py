@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from .pimp_my_bot import theme
 from .permission_handler import PermissionManager
-from .bot_level_mapping import parse_state
+from .bot_level_mapping import parse_state, parse_furnace_level
 from .alliance_member_edit import is_placeholder_name, apply_member_edit
 from .alliance import check_alliance_state
 from .gift_state_resolver import verify_add_state, get_alliance_kid
@@ -33,7 +33,8 @@ logger = logging.getLogger('alliance')
 # free text and cannot be delimited from the fields that follow it.
 INTAKE_PATTERN = re.compile(
     r"^ACE_INTAKE\s+v1\s+fid=(\d{1,20})\s+discord=(\d{15,25})"
-    r"(?:\s+state=(\d{1,6}))?(?:\s+name=(.{1,40}))?\s*$",
+    r"(?:\s+state=(\d{1,6}))?(?:\s+fc=([A-Za-z0-9-]{1,16}))?"
+    r"(?:\s+name=(.{1,40}))?\s*$",
     re.IGNORECASE,
 )
 
@@ -43,17 +44,20 @@ REPLAY_LIMIT = 50
 
 
 def parse_intake(content):
-    """`ACE_INTAKE v1 fid=<id> discord=<id> [state=<n>] [name=<in-game name>]`.
-    Returns (fid, discord_id, state, name), None for anything omitted, or None
-    if the line is not a handover."""
+    """`ACE_INTAKE v1 fid=<id> discord=<id> [state=<n>] [fc=<level>] [name=<name>]`.
+    Returns (fid, discord_id, state, furnace_lv, name), None for anything
+    omitted or unreadable, or None if the line is not a handover."""
     match = INTAKE_PATTERN.match((content or "").strip())
     if not match:
         return None
     state = int(match.group(3)) if match.group(3) else None
+    # This bot owns what a level means: "30", "FC10" and "FC10-2" all resolve
+    # here, and anything else is dropped rather than stored as a number.
+    furnace_lv = parse_furnace_level(match.group(4)) if match.group(4) else None
     # A forwarded name is self-reported, exactly like the one a member types
     # into /register, so it is cleaned rather than trusted for formatting.
-    name = (match.group(4) or "").replace("`", "").strip() or None
-    return int(match.group(1)), int(match.group(2)), state, name
+    name = (match.group(5) or "").replace("`", "").strip() or None
+    return int(match.group(1)), int(match.group(2)), state, furnace_lv, name
 
 
 def _now_iso():
@@ -116,7 +120,8 @@ class RosterIntake(commands.Cog):
     def _user_row(self, fid):
         with closing(sqlite3.connect('db/users.sqlite', timeout=30.0)) as db:
             return db.execute(
-                "SELECT fid, discord_id, alliance, nickname FROM users WHERE fid = ?", (fid,)
+                "SELECT fid, discord_id, alliance, nickname, furnace_lv FROM users WHERE fid = ?",
+                (fid,),
             ).fetchone()
 
     def _attach_discord(self, fid, discord_id, server_id):
@@ -128,17 +133,19 @@ class RosterIntake(commands.Cog):
             )
             db.commit()
 
-    def _insert_user(self, fid, alliance_id, kid, discord_id, server_id, nickname=None):
+    def _insert_user(self, fid, alliance_id, kid, discord_id, server_id, nickname=None, furnace_lv=None):
         with closing(sqlite3.connect('db/users.sqlite', timeout=30.0)) as db, db:
             db.execute(
                 "INSERT INTO users (fid, nickname, furnace_lv, kid, stove_lv_content, "
                 "alliance, discord_id, discord_server_id, discord_id_updated_at) "
-                "VALUES (?, ?, 0, ?, NULL, ?, ?, ?, ?)",
-                (fid, nickname or f"Player {fid}", kid, alliance_id, discord_id, server_id, _now_iso()),
+                "VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)",
+                (fid, nickname or f"Player {fid}", furnace_lv or 0, kid, alliance_id,
+                 discord_id, server_id, _now_iso()),
             )
             db.commit()
 
-    async def register_intake(self, guild, alliance_id, fid, discord_id, given_state, name=None):
+    async def register_intake(self, guild, alliance_id, fid, discord_id, given_state,
+                              name=None, furnace_lv=None):
         """Returns (status, message). Status is one of added, linked, already,
         conflict, other-alliance, state, alliance-missing, error."""
         alliance_name = self._alliance_name(alliance_id)
@@ -160,20 +167,24 @@ class RosterIntake(commands.Cog):
                     f"ID `{fid}` is already in `{other}`. Members are never moved "
                     f"automatically."
                 )
-            # A row that never got a real name is worth more with one, whichever
-            # path put it there.
-            named = False
+            # A row that never got a real name or level is worth more with one,
+            # whichever path put it there. Both go through the edit that records
+            # the change in history rather than a silent write.
+            edits = {}
             if name and is_placeholder_name(existing[3], fid):
-                named = bool(await asyncio.to_thread(apply_member_edit, fid, nickname=name))
+                edits["nickname"] = name
+            if furnace_lv and not existing[4]:
+                edits["furnace_lv"] = furnace_lv
+            named = bool(await asyncio.to_thread(apply_member_edit, fid, **edits)) if edits else False
             if existing_discord:
                 return "already", (
                     f"ID `{fid}` is already registered in {alliance_name}."
-                    + (f" Its placeholder name is now `{name}`." if named else "")
+                    + (f" Filled in its {' and '.join(edits)}." if named else "")
                 )
             self._attach_discord(fid, discord_id, guild.id)
             return "linked", (
                 f"Linked existing ID `{fid}` to <@{discord_id}>."
-                + (f" Its placeholder name is now `{name}`." if named else "")
+                + (f" Filled in its {' and '.join(edits)}." if named else "")
             )
 
         # A handover is machine input, so the ID is proved against the game API
@@ -207,7 +218,8 @@ class RosterIntake(commands.Cog):
             return "state", state_error
 
         try:
-            self._insert_user(fid, alliance_id, kid, discord_id, guild.id, nickname=name)
+            self._insert_user(fid, alliance_id, kid, discord_id, guild.id,
+                              nickname=name, furnace_lv=furnace_lv)
         except sqlite3.IntegrityError:
             return "already", f"ID `{fid}` was added by another process."
         display = name or f"Player {fid}"
@@ -236,11 +248,11 @@ class RosterIntake(commands.Cog):
         parsed = parse_intake(message.content)
         if parsed is None:
             return False
-        fid, discord_id, given_state, name = parsed
+        fid, discord_id, given_state, furnace_lv, name = parsed
 
         try:
             status, detail = await self.register_intake(
-                message.guild, alliance_id, fid, discord_id, given_state, name
+                message.guild, alliance_id, fid, discord_id, given_state, name, furnace_lv
             )
         except Exception as e:
             logger.error(f"Roster intake failed for fid {fid}: {e}")

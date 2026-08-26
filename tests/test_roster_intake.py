@@ -11,14 +11,14 @@ from cogs.roster_intake import parse_intake
 
 def test_parses_the_minimum_payload():
     assert parse_intake("ACE_INTAKE v1 fid=821103058 discord=701119021172523078") == (
-        821103058, 701119021172523078, None, None
+        821103058, 701119021172523078, None, None, None
     )
 
 
 def test_parses_an_optional_state():
     assert parse_intake(
         "ACE_INTAKE v1 fid=821103058 discord=701119021172523078 state=4562"
-    ) == (821103058, 701119021172523078, 4562, None)
+    ) == (821103058, 701119021172523078, 4562, None, None)
 
 
 def test_parses_an_in_game_name():
@@ -26,23 +26,23 @@ def test_parses_an_in_game_name():
     by hand, which is what happened to the first two members."""
     assert parse_intake(
         "ACE_INTAKE v1 fid=816479488 discord=701119021172523078 state=4562 name=NOUR"
-    ) == (816479488, 701119021172523078, 4562, "NOUR")
+    ) == (816479488, 701119021172523078, 4562, None, "NOUR")
     # A name is free text: spaces and non-Latin scripts are ordinary.
     assert parse_intake(
         "ACE_INTAKE v1 fid=816479488 discord=701119021172523078 name=Lord Ahmed 99"
-    )[3] == "Lord Ahmed 99"
+    )[4] == "Lord Ahmed 99"
     assert parse_intake(
         "ACE_INTAKE v1 fid=816479488 discord=701119021172523078 name=نور"
-    )[3] == "نور"
+    )[4] == "نور"
     # Backticks would break the embed the name is rendered into.
     assert parse_intake(
         "ACE_INTAKE v1 fid=816479488 discord=701119021172523078 name=`NOUR`"
-    )[3] == "NOUR"
+    )[4] == "NOUR"
 
 
 def test_tolerates_surrounding_whitespace():
     assert parse_intake("  ACE_INTAKE  v1   fid=1 discord=701119021172523078  \n") == (
-        1, 701119021172523078, None, None
+        1, 701119021172523078, None, None, None
     )
 
 
@@ -97,8 +97,8 @@ class _Guild:
     id = 1541772698546606090
 
 
-def _run(cog, fid=821103058, discord_id=701119021172523078, state=None, name=None):
-    return asyncio.run(cog.register_intake(_Guild(), 1, fid, discord_id, state, name))
+def _run(cog, fid=821103058, discord_id=701119021172523078, state=None, name=None, furnace=None):
+    return asyncio.run(cog.register_intake(_Guild(), 1, fid, discord_id, state, name, furnace))
 
 
 def test_refuses_an_id_the_game_api_will_not_confirm(monkeypatch):
@@ -125,10 +125,12 @@ def test_adds_an_id_the_game_api_confirms(monkeypatch):
     monkeypatch.setattr(intake_module, "verify_add_state", match)
 
     cog = _cog()
-    status, _ = _run(cog, name="NOUR")
+    status, _ = _run(cog, name="NOUR", furnace=80)
     assert status == "added"
-    # The name rides along, so the member is not filed as Player <id>.
-    assert cog.inserted == [((821103058, 1, 4562, 701119021172523078, _Guild.id), {"nickname": "NOUR"})]
+    # Name and level ride along, so the member is not filed as Player <id> at 0.
+    assert cog.inserted == [
+        ((821103058, 1, 4562, 701119021172523078, _Guild.id), {"nickname": "NOUR", "furnace_lv": 80})
+    ]
 
 
 def test_a_multistate_alliance_falls_back_to_the_forwarded_state(monkeypatch):
@@ -145,18 +147,55 @@ def test_a_multistate_alliance_falls_back_to_the_forwarded_state(monkeypatch):
 
 
 def test_never_moves_a_member_between_alliances(monkeypatch):
-    cog = _cog(existing_row=(821103058, None, "7", "Someone"))
+    cog = _cog(existing_row=(821103058, None, "7", "Someone", 0))
     assert _run(cog)[0] == "other-alliance"
     assert cog.attached == []
 
 
 def test_refuses_an_id_linked_to_a_different_discord_account(monkeypatch):
-    cog = _cog(existing_row=(821103058, 382474155691343885, "1", "Someone"))
+    cog = _cog(existing_row=(821103058, 382474155691343885, "1", "Someone", 0))
     assert _run(cog)[0] == "conflict"
     assert cog.attached == []
 
 
 def test_links_an_existing_unlinked_row(monkeypatch):
-    cog = _cog(existing_row=(821103058, None, "1", "Someone"))
+    cog = _cog(existing_row=(821103058, None, "1", "Someone", 0))
     assert _run(cog)[0] == "linked"
     assert cog.attached == [(821103058, 701119021172523078, _Guild.id)]
+
+
+def test_reads_a_furnace_level_this_bot_understands():
+    """ACE forwards the level as typed with the spaces squeezed out, and this
+    bot is what decides FC10-2 means 82."""
+    line = "ACE_INTAKE v1 fid=816479488 discord=701119021172523078 state=4562 fc=FC10-2 name=NOUR"
+    assert parse_intake(line) == (816479488, 701119021172523078, 4562, 82, "NOUR")
+    plain = "ACE_INTAKE v1 fid=816479488 discord=701119021172523078 fc=30"
+    assert parse_intake(plain)[3] == 30
+    # Unreadable is dropped, not stored as a number.
+    assert parse_intake("ACE_INTAKE v1 fid=816479488 discord=701119021172523078 fc=banana")[3] is None
+    # A name containing "fc=" is still a name, because the name runs last.
+    assert parse_intake(
+        "ACE_INTAKE v1 fid=816479488 discord=701119021172523078 name=fc=weird"
+    )[4] == "fc=weird"
+
+
+def test_fills_in_a_placeholder_row_from_a_handover(monkeypatch):
+    """The row exists with no real name and no level, which is what the first
+    handovers produced before either was carried."""
+    recorded = {}
+
+    def fake_edit(fid, **fields):
+        recorded.update(fields)
+        return list(fields)
+    monkeypatch.setattr(intake_module, "apply_member_edit", fake_edit)
+
+    cog = _cog(existing_row=(816479488, None, "1", "Player 816479488", 0))
+    status, message = _run(cog, fid=816479488, name="NOUR", furnace=80)
+    assert status == "linked"
+    assert recorded == {"nickname": "NOUR", "furnace_lv": 80}
+
+    # A member who already has a real name and level keeps them.
+    recorded.clear()
+    cog = _cog(existing_row=(816479488, None, "1", "Nour", 27))
+    _run(cog, fid=816479488, name="SOMETHING ELSE", furnace=80)
+    assert recorded == {}
