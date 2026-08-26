@@ -11,19 +11,38 @@ from cogs.roster_intake import parse_intake
 
 def test_parses_the_minimum_payload():
     assert parse_intake("ACE_INTAKE v1 fid=821103058 discord=701119021172523078") == (
-        821103058, 701119021172523078, None
+        821103058, 701119021172523078, None, None
     )
 
 
 def test_parses_an_optional_state():
     assert parse_intake(
         "ACE_INTAKE v1 fid=821103058 discord=701119021172523078 state=4562"
-    ) == (821103058, 701119021172523078, 4562)
+    ) == (821103058, 701119021172523078, 4562, None)
+
+
+def test_parses_an_in_game_name():
+    """Without it every handover lands as `Player <id>` and someone renames it
+    by hand, which is what happened to the first two members."""
+    assert parse_intake(
+        "ACE_INTAKE v1 fid=816479488 discord=701119021172523078 state=4562 name=NOUR"
+    ) == (816479488, 701119021172523078, 4562, "NOUR")
+    # A name is free text: spaces and non-Latin scripts are ordinary.
+    assert parse_intake(
+        "ACE_INTAKE v1 fid=816479488 discord=701119021172523078 name=Lord Ahmed 99"
+    )[3] == "Lord Ahmed 99"
+    assert parse_intake(
+        "ACE_INTAKE v1 fid=816479488 discord=701119021172523078 name=نور"
+    )[3] == "نور"
+    # Backticks would break the embed the name is rendered into.
+    assert parse_intake(
+        "ACE_INTAKE v1 fid=816479488 discord=701119021172523078 name=`NOUR`"
+    )[3] == "NOUR"
 
 
 def test_tolerates_surrounding_whitespace():
     assert parse_intake("  ACE_INTAKE  v1   fid=1 discord=701119021172523078  \n") == (
-        1, 701119021172523078, None
+        1, 701119021172523078, None, None
     )
 
 
@@ -69,7 +88,7 @@ def _cog(existing_row=None, alliance_name="ArabChampEmpire"):
     cog.attached = []
     cog._alliance_name = lambda alliance_id: alliance_name
     cog._user_row = lambda fid: existing_row
-    cog._insert_user = lambda *args: cog.inserted.append(args)
+    cog._insert_user = lambda *args, **kwargs: cog.inserted.append((args, kwargs))
     cog._attach_discord = lambda *args: cog.attached.append(args)
     return cog
 
@@ -78,8 +97,8 @@ class _Guild:
     id = 1541772698546606090
 
 
-def _run(cog, fid=821103058, discord_id=701119021172523078, state=None):
-    return asyncio.run(cog.register_intake(_Guild(), 1, fid, discord_id, state))
+def _run(cog, fid=821103058, discord_id=701119021172523078, state=None, name=None):
+    return asyncio.run(cog.register_intake(_Guild(), 1, fid, discord_id, state, name))
 
 
 def test_refuses_an_id_the_game_api_will_not_confirm(monkeypatch):
@@ -106,9 +125,10 @@ def test_adds_an_id_the_game_api_confirms(monkeypatch):
     monkeypatch.setattr(intake_module, "verify_add_state", match)
 
     cog = _cog()
-    status, _ = _run(cog)
+    status, _ = _run(cog, name="NOUR")
     assert status == "added"
-    assert cog.inserted == [(821103058, 1, 4562, 701119021172523078, _Guild.id)]
+    # The name rides along, so the member is not filed as Player <id>.
+    assert cog.inserted == [((821103058, 1, 4562, 701119021172523078, _Guild.id), {"nickname": "NOUR"})]
 
 
 def test_a_multistate_alliance_falls_back_to_the_forwarded_state(monkeypatch):
@@ -117,7 +137,7 @@ def test_a_multistate_alliance_falls_back_to_the_forwarded_state(monkeypatch):
     monkeypatch.setattr(intake_module, "get_alliance_kid", lambda alliance_id: None)
     cog = _cog()
     assert _run(cog, state=245)[0] == "added"
-    assert cog.inserted[0][2] == 245
+    assert cog.inserted[0][0][2] == 245
 
     cog = _cog()
     assert _run(cog, state=None)[0] == "state"
