@@ -10,3 +10,4 @@ backups
 captcha_images
 .vscode
 CLAUDE.md
+ace-rollback-*
