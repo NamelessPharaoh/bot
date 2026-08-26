@@ -14,6 +14,7 @@ from discord.ext import commands
 import sqlite3
 import logging
 import re
+import asyncio
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
@@ -21,7 +22,7 @@ from .pimp_my_bot import theme
 from .permission_handler import PermissionManager
 from .bot_level_mapping import parse_state
 from .alliance import check_alliance_state
-from .gift_state_resolver import verify_add_state
+from .gift_state_resolver import verify_add_state, get_alliance_kid
 
 logger = logging.getLogger('alliance')
 
@@ -156,21 +157,31 @@ class RosterIntake(commands.Cog):
             self._attach_discord(fid, discord_id, guild.id)
             return "linked", f"Linked existing ID `{fid}` to <@{discord_id}>."
 
-        # A handover is machine input, so the ID is always probed against the
-        # game API rather than trusted. The state the manager bot forwards is
-        # only a fallback for an alliance that spans several states, where there
-        # is no home state to probe against.
-        gift_cog = self.bot.get_cog("GiftOperations")
-        kid = None
-        if gift_cog is not None:
-            kid, _ = await verify_add_state(gift_cog, fid, alliance_id)
-        if kid is None and given_state is not None:
-            kid = parse_state(given_state)
-        if kid is None:
-            return "state", (
-                f"Could not confirm ID `{fid}` in this alliance's state. Check the "
-                f"ID, or add the member from Alliances -> Add Member."
-            )
+        # A handover is machine input, so the ID is proved against the game API
+        # rather than trusted. An alliance with a home state must probe clean:
+        # anything other than a match, including an API error, is a refusal, so
+        # a mistyped ID can never enter the roster on the strength of a state
+        # the other bot forwarded.
+        home_state = await asyncio.to_thread(get_alliance_kid, alliance_id)
+        if home_state is not None:
+            gift_cog = self.bot.get_cog("GiftOperations")
+            kid, verified = (None, False)
+            if gift_cog is not None:
+                kid, verified = await verify_add_state(gift_cog, fid, alliance_id)
+            if not verified or kid is None:
+                return "state", (
+                    f"Could not confirm ID `{fid}` in state `{home_state}`. Check the "
+                    f"ID, or add the member from Alliances -> Add Member."
+                )
+        else:
+            # The alliance spans several states, so there is no home state to
+            # probe against and the forwarded state is the only thing to go on.
+            kid = parse_state(given_state) if given_state is not None else None
+            if kid is None:
+                return "state", (
+                    f"This alliance has members in several states, so ID `{fid}` "
+                    f"needs a state. Add the member from Alliances -> Add Member."
+                )
 
         state_error = check_alliance_state(alliance_id, kid)
         if state_error:
