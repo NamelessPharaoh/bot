@@ -29,42 +29,45 @@ back.
 
 ---
 
-## 2. Build the ACE deploy automation
+## 2. Finish the ACE deploy automation - 2 steps left
 
-**What:** The Part A half of `~/.claude/plans/stateful-waddling-bachman.md`: a self-hosted GitHub
-Actions runner as an unprivileged `ghrunner` user, `/usr/local/sbin/ace-deploy`, a sudoers entry
-scoped to that one script, and `.github/workflows/deploy-ace.yml` triggered on push to main only.
+**Built and verified on 2026-08-27.** `/usr/local/sbin/ace-deploy` (root, 0755) with all six review
+fixes, the `ghrunner` user, a sudoers entry scoped to that one script, an ed25519 deploy key with
+GitHub's host key pinned (fingerprint checked against the published
+`SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`), runner 2.337.0 staged at
+`/opt/actions-runner-ace` with dependencies installed, and `.github/workflows/deploy-ace.yml`
+committed in the ACE repo as `2e2f1e9` (NOT pushed - see step 2).
 
-**Why:** `ace-bot` still deploys by hand. Today's session was the proof: three commits merged to
-main and the alliance still saw the removed form fields until a manual pull, because the bot runs
-from a separate checkout at `/opt/ace` that nobody had updated.
+Verified: `ghrunner` cannot read `.env`, `/var/lib/ace/`, or the deploy key, can invoke `ace-deploy`
+through sudo, and is refused `systemctl` and `bash`.
 
-**Blocked on two things only you can do:**
-- A runner registration token (ACE repo -> Settings -> Actions -> Runners -> New self-hosted runner).
-  Short-lived, so grab it when we start.
-- A read-only deploy key: I generate the keypair as the `ace` user, you paste the public half into
-  Settings -> Deploy keys. This also fixes manual deploys, which currently fail with
-  `could not read Username` because the `ace` account has no GitHub credentials and the repo is
-  private. Today that was worked around with a local bare mirror.
+**Step 1 - register the deploy key.** Paste this into the ACE repo -> Settings -> Deploy keys ->
+Add deploy key. Leave "Allow write access" UNCHECKED:
 
-**Six fixes must be folded in** (from the eng review and the Codex pass, all verified in source):
-- Pin `${GITHUB_SHA}` and deploy exactly the commit that was tested. Re-fetching `origin/main` can
-  deploy an untested commit when two pushes land close together.
-- Migration-aware rollback. `EventStore`'s constructor calls `migrate()` (`src/database.ts:88`) and
-  `SchemaTooNewError` refuses to start against a newer schema (`src/migrations.ts:26-33`), so a plain
-  code rollback after a migration crash-loops under `Restart=always`. Today's manual deploy applied
-  migrations 8 and 9, so this is a live concern, not theory.
-- Read the schema version with a direct `SELECT MAX(version) FROM schema_migrations`. `npm run
-  migrate` is not a read-only probe - it *applies* migrations (`src/cli.ts:67`).
-- Explicit CWD on every `npm` call. HANDOVER.md calls the working directory load-bearing.
-- Timeout every CLI call: `connectClient()` awaits ready with no timeout (`src/client.ts:10-19`), so
-  the health gate can hang forever.
-- Accept `degraded` from `npm run health`; only `failed` sets a non-zero exit (`src/cli.ts:346`).
-  The live bot is degraded today from pre-existing manifest drift (see item 3).
+```
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuazk5hVSBhJ2s0+B5DSFzTH4KR1fhpLYgzhULv2Gjy ace-deploy@ubuntu-4gb-hel1-3
+```
 
-**Depends on:** the two GitHub-side items above.
+Then confirm: `sudo -u ace git -C /opt/ace fetch origin main` (currently fails with "Please make
+sure you have the correct access rights" - that is expected until the key is added).
 
----
+**Step 2 - register the runner, then push the workflow.** Get a token from the ACE repo ->
+Settings -> Actions -> Runners -> New self-hosted runner (short-lived, so grab it immediately
+before running this):
+
+```
+sudo -u ghrunner /opt/actions-runner-ace/config.sh \
+  --url https://github.com/NamelessPharaoh/WOS-discord-manager \
+  --token <TOKEN> --labels self-hosted,ace --unattended
+cd /opt/actions-runner-ace && sudo ./svc.sh install ghrunner && sudo ./svc.sh start
+```
+
+The workflow is held back deliberately: pushing it before a runner exists queues a job that never
+runs. Push it once the runner shows Idle.
+
+**Untested until the first real run:** the whole path, including whether `npm ci` builds
+better-sqlite3 natively in the runner's workspace. The rollback path is worth exercising
+deliberately, same as item 1.
 
 ## 3. ACE manifest drift
 
