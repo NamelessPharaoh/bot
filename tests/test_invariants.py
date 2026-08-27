@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import re
 import sys
 from pathlib import Path
@@ -16,9 +17,14 @@ import pytest
 from cogs.pimp_my_bot import ICON_NAMES
 
 REPO = Path(__file__).resolve().parent.parent
-COGS = REPO / "cogs"
+# Tree under test - see tests/conftest.py, which puts it on sys.path. Defaults
+# to this repo; a deploy gate points it at the install root whose payload is
+# about to restart, so the scan follows the same files the import above did.
+TREE = Path(os.environ.get("WOS_TEST_TREE") or REPO).resolve()
+COGS = TREE / "cogs"
 COG_FILES = sorted(COGS.glob("*.py"))  # includes cogs/bot_restart.py
-PY_FILES = COG_FILES + [REPO / "main.py"]
+MAIN = TREE / "main.py"
+PY_FILES = COG_FILES + [MAIN]
 
 
 def _read(p: Path) -> str:
@@ -100,7 +106,7 @@ KNOWN_NON_COG: set[str] = set()  # get_cog() targets that are intentionally not 
 
 
 def _cog_load_list() -> list[str]:
-    m = re.search(r"cogs\s*=\s*(\[[^\]]*\])", _read(REPO / "main.py"))
+    m = re.search(r"cogs\s*=\s*(\[[^\]]*\])", _read(MAIN))
     assert m, "could not find the cog load list in main.py"
     return ast.literal_eval(m.group(1))
 
@@ -126,7 +132,7 @@ def test_get_cog_strings_match_registered_cogs():
     registered = _registered_cog_classes()
     bad = []
     targets = re.compile(r'get_cog\(\s*["\']([^"\']+)["\']\s*\)')
-    for f in COG_FILES + [REPO / "main.py"]:
+    for f in COG_FILES + [MAIN]:
         for m in targets.finditer(_read(f)):
             name = m.group(1)
             if name not in registered and name not in KNOWN_NON_COG:
@@ -158,9 +164,26 @@ PKG_TO_IMPORT = {
 ALLOWED_TRANSITIVE = {"cv2", "packaging", "pkg_resources", "yaml"}
 
 
+def _requirements_file() -> Path | None:
+    """The dependency list belonging to the tree under test.
+
+    The repo root has had no requirements.txt since 56aaf4f (2024-11-04); the
+    list ships with the runtime payload instead (Bot-runtime/requirements.txt,
+    added in adae902). An install root keeps it at the top level, so prefer the
+    tree under test and fall back to the payload copy carried in this repo.
+    """
+    for candidate in (TREE / "requirements.txt", REPO / "Bot-runtime" / "requirements.txt"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _requirement_packages() -> list[str]:
+    path = _requirements_file()
+    if path is None:
+        return []
     out = []
-    for line in _read(REPO / "requirements.txt").splitlines():
+    for line in _read(path).splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
             out.append(re.split(r"[<>=!~]", line, maxsplit=1)[0].strip().lower())
@@ -168,12 +191,15 @@ def _requirement_packages() -> list[str]:
 
 
 def test_declared_requirements_are_importable():
+    path = _requirements_file()
+    if path is None:
+        pytest.skip("no requirements.txt found for the tree under test")
     missing = []
     for pkg in _requirement_packages():
         mod = PKG_TO_IMPORT.get(pkg, pkg.replace("-", "_"))
         if importlib.util.find_spec(mod) is None:
             missing.append(f"{pkg} (import {mod})")
-    assert not missing, f"requirements.txt entries not importable in the venv: {missing}"
+    assert not missing, f"{path} entries not importable in the venv: {missing}"
 
 
 def _third_party_imports() -> set[str]:

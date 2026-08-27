@@ -3,3 +3,4 @@ docker/bootstrap.sh text eol=lf
 
 # Developer-only: excluded from release source archives
 tests/ export-ignore
+pytest.ini export-ignore

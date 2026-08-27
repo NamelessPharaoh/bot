@@ -38,7 +38,9 @@ ROOTS_TO_SCAN = [
 ]
 
 SKIP_DIR_NAMES = {
-    "bot_venv", ".venv", ".git", "__pycache__", "site-packages",
+    # "venv" as well as "bot_venv": Bot-runtime/venv/ is a real runtime venv in
+    # this repo, and walking it scanned third-party sources for no benefit.
+    "venv", "bot_venv", ".venv", ".git", "__pycache__", "site-packages",
     "backups", "log", "db", "fonts", "models", "docker", "install", "tests",
 }
 
