@@ -5,6 +5,26 @@ service layout; that was a deliberate call, not an oversight. Never put a creden
 
 ---
 
+## 0. Two open findings from the codex review of the deploy scripts (2026-08-28)
+
+Codex reviewed both root deploy scripts (they are not in version control, so that was their only
+review). 15 findings, 9 of them P1; 13 are fixed and verified. Two remain:
+
+**wos-deploy: rollback cannot restore the venv properly.** `pip install` mutates
+`Bot-runtime/venv` in place, so a failure part-way leaves a half-changed environment that git
+cannot revert. Rollback now reinstalls PREV's `requirements.txt` as a best effort, which is not
+the same as a true restore. The real fix is versioned venvs: build `venv-<sha>` alongside, switch
+a symlink atomically, keep the previous one for rollback.
+
+**wos-deploy: the CI venv is not reproducible per candidate.** `/opt/ci/wos-venv` is long-lived and
+`pip install -r` never removes packages, so a package left behind by an earlier candidate can make
+a later one pass a gate it should fail. Fix by recreating (or `pip-sync`-ing) the venv from the
+target's requirements for each candidate.
+
+Neither blocks the automation, and both bots deploy correctly today.
+
+---
+
 ## 1. Exercise wos-deploy's untested paths
 
 **What:** Deliberately drive `/usr/local/sbin/wos-deploy` down the four branches that have never
