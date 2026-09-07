@@ -5,7 +5,84 @@ service layout; that was a deliberate call, not an oversight. Never put a creden
 
 ---
 
-## 0. Two open findings from the codex review of the deploy scripts (2026-08-28)
+## 0. Relocate the bot out of /root
+
+**What:** Move the install from `/root/bot/Bot-runtime` to `/var/lib/wos-bot`, run `wos-bot.service`
+as a dedicated service user, grant an MCP-reader group read access to `db/` and `log/`, and allow
+one exact `systemctl restart wos-bot` through sudoers.
+
+**Why:** `/root` is `drwx------`, so *no* unprivileged tooling can read `db/` or `log/` no matter
+what their own modes are, and `/proc/<pid>/fd` is root-only. That single fact is the reason the MCP
+control surface has to run as root with a forced SSH command as its entire security boundary. Found
+by the outside voice during the MCP plan review: the plan is building a remote root API around a
+deployment defect. Fixing this makes a stolen key read two directories instead of owning the box.
+
+**Careful:** touches the systemd unit, `/usr/local/sbin/wos-deploy`, both install roots, and
+`backups/`, on a live bot. Do it deliberately with its own plan, not as a prerequisite to something
+smaller. **Depends on:** item 7 (exercise the rollback path first).
+
+## 1. Proactive alerting: let Claude tell you when the bot is unhappy
+
+**What:** A scheduled `claude -p` run that reads bot state through the MCP read tools every N minutes
+and messages you only on an anomaly: queue stalled, a cog missing, a deploy rolled back, redemption
+failures spiking.
+
+**Why:** It inverts the MCP control surface from something you query into something that talks to
+you, which is the actual 12-month goal that justified building the read plane.
+
+**Deferred until** the read plane has run in production long enough to source real thresholds.
+Thresholds tuned against tools nobody has used produce alerts that get muted within a week.
+**Depends on:** MCP Phase 1 shipped and in use.
+
+## 2. Deploy-history tool for the MCP surface
+
+**What:** Read `/var/lib/wos-deploy/last-failed` and `Bot-runtime/backups/` so deploy outcomes are
+legible from chat without SSH.
+
+**Why:** `wos-deploy` is the most autonomous part of the stack and currently the least visible.
+
+**Deferred because** `wos-deploy` is not in version control, so the tool would couple to paths
+nothing tracks, with no test to catch a drift. `journalctl -u wos-deploy` answers the same question
+at a terminal. Revisit after item 7's paths have settled.
+
+## 3. Point the MCP server at ace-bot as a second target
+
+**What:** Same host, same shape of problem, largely configuration rather than new code.
+
+**Why:** ACE has no state visibility at all today, and its deploy automation is the less exercised
+of the two.
+
+**Deferred as** premature abstraction: generalizing to two targets before the first has run once
+reliably produces the wrong seams. **Depends on:** items 9 and 10 (ACE manifest drift and the
+credential rotation) being settled before an AI gets access to it.
+
+## 4. Narrow bot_health.reload_cogs' catch-all exception handler
+
+**What:** Replace `except Exception as e` at `cogs/bot_health.py:1375` with named exception classes.
+
+**Why:** It collapses a cog syntax error, a missing dependency, a discord.py `ExtensionError`, and a
+bug in the cog's own `setup()` into one undifferentiated string. MCP Phase 2's `reload_cog` reuses
+this method, and its caller is an AI that will have to guess. Start by enumerating what
+`load_extension` / `reload_extension` actually raise in discord.py 2.7.
+
+**Not required** by Phase 2, just less legible without it.
+
+## 5. Tree-wide em-dash audit and an invariant test
+
+**What:** Audit the em-dashes in `cogs/` against the narrow rule (no em-dash as prose punctuation;
+`-` as a column separator or empty-value placeholder is fine), fix the prose ones, and pin the
+structural half in `tests/test_invariants.py`.
+
+**Why:** `CLAUDE.md` calls this a hard constraint swept out in `138f7f7`, but nothing enforces it and
+the tree has drifted to 298 occurrences across 294 lines, led by `bear_track.py` (87),
+`attendance_ocr_review.py` (51) and `attendance_ocr_parsers.py` (34). Measured with
+`grep -ro '\u2014' cogs/ | wc -l`. Right now the documented rule and the code disagree, which
+misleads anyone who trusts the file.
+
+**Careful:** a mechanical test can only pin the structural half; separating prose from structure
+needs human judgement per site.
+
+## 6. Two open findings from the codex review of the deploy scripts (2026-08-28)
 
 Codex reviewed both root deploy scripts (they are not in version control, so that was their only
 review). 15 findings, 9 of them P1; 13 are fixed and verified. Two remain:
@@ -25,7 +102,7 @@ Neither blocks the automation, and both bots deploy correctly today.
 
 ---
 
-## 1. Exercise wos-deploy's untested paths
+## 7. Exercise wos-deploy's untested paths
 
 **What:** Deliberately drive `/usr/local/sbin/wos-deploy` down the four branches that have never
 run: rollback, `last-failed` suppression, the requirements-changed reinstall, and retention pruning.
@@ -49,7 +126,7 @@ back.
 
 ---
 
-## 2. Finish the ACE deploy automation - 2 steps left
+## 8. Finish the ACE deploy automation - 2 steps left
 
 **Built and verified on 2026-08-27.** `/usr/local/sbin/ace-deploy` (root, 0755) with all six review
 fixes, the `ghrunner` user, a sudoers entry scoped to that one script, an ed25519 deploy key with
@@ -89,7 +166,7 @@ runs. Push it once the runner shows Idle.
 better-sqlite3 natively in the runner's workspace. The rollback path is worth exercising
 deliberately, same as item 1.
 
-## 3. ACE manifest drift
+## 9. ACE manifest drift
 
 **What:** `npm run health` on the live ACE bot reports `degraded`: "2 missing resource(s) and 4
 configuration difference(s)". Run `npm run preview` from `/opt/ace/ace-discord-manager` to see the
@@ -103,7 +180,7 @@ strict, which is a better gate.
 
 ---
 
-## 4. Consider rotating the ACE credentials that sat in ace-rollback-*
+## 10. Consider rotating the ACE credentials that sat in ace-rollback-*
 
 **What:** The deleted `ace-rollback-20260826T121736/` held a live `DISCORD_TOKEN` and
 `ACE_BACKUP_KEY` in an `env.backup`, inside a working tree for a public repo.
