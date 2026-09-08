@@ -3,6 +3,10 @@
 Deferred work, newest first. This repo is public and the entries below name server paths and
 service layout; that was a deliberate call, not an oversight. Never put a credential here.
 
+The MCP control surface that items 0-4 refer to is designed, phased and reviewed in
+[`docs/designs/mcp-control-surface.md`](docs/designs/mcp-control-surface.md). Nothing in it is
+built yet.
+
 ---
 
 ## 0. Relocate the bot out of /root
